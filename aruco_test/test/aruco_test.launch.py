@@ -134,6 +134,10 @@ def launch_setup(context, *args, **kwargs):
         executable="aruco_detector_node",
         name="aruco_detector_node",
         parameters=[aruco_config_path],
+        remappings=[
+            ('/image', '/cam_down/image_color'),
+            ('/camera_info', '/cam_down/camera_info'),
+        ],
         output="screen",
     )
 
