@@ -1,0 +1,1 @@
+usage: colcon test --packages-select aruco_test --event-handlers console_direct+
