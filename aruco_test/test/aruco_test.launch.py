@@ -1,128 +1,75 @@
-import time as pytime
-from ament_index_python.packages import get_package_share_directory
-from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, OpaqueFunction
-from launch.substitution import Substitution
-from launch.substitutions import (
-    LaunchConfiguration,
-    PathJoinSubstitution,
-    TextSubstitution,
-)
-
-import launch
-import launch_ros
-import launch_testing.actions
-from launch_ros.actions import Node
 import os
 import yaml
-
+import tempfile
+import time as pytime
 import unittest
-import launch_testing.actions
+
 import rclpy
 import geometry_msgs.msg as geometry_msgs
-from rclpy.qos import QoSProfile, qos_profile_sensor_data
+from rclpy.qos import qos_profile_sensor_data
 
-gpu_tasks = [
-    "default",
-    "docking",
-    "pipeline",
-    "structure",
-    "orca_demo",
-    "freya_demo",
-    "orca_freya_demo",
-]
-no_gpu_tasks = [
-    "orca_no_gpu",
-    "freya_no_gpu",
-]
+from launch import LaunchDescription
+from launch.actions import DeclareLaunchArgument, OpaqueFunction, TimerAction, IncludeLaunchDescription
+from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
+from launch.launch_description_sources import PythonLaunchDescriptionSource
+from ament_index_python.packages import get_package_share_directory
 
+from launch_ros.actions import Node
+import launch_testing.actions
+import launch_testing
+import launch
 
-class ConcatenateSubstitutions(Substitution):
-    def __init__(self, *substitutions):
-        self.substitutions = substitutions
-
-    def perform(self, context):
-        return "".join([sub.perform(context) for sub in self.substitutions])
-
-
-def get_task_and_rendering_value(context):
-    """Determine the task and rendering value."""
-    rendering_enabled = (
-        LaunchConfiguration("rendering").perform(context).lower() == "true"
+def load_scenario_config(task_val):
+    """
+    Loads the scenario config YAML for the given task.
+    """
+    config_path = os.path.join(
+        get_package_share_directory("stonefish_sim"),
+        "config",
+        f"{task_val}_config.yaml"
     )
 
-    task_arg = LaunchConfiguration("task").perform(context)
-    if task_arg == "auto":
-        task_val = "default" if rendering_enabled else "orca_no_gpu"
-    else:
-        task_val = task_arg
+    if not os.path.exists(config_path):
+        raise FileNotFoundError(f"Missing scenario config: {config_path}")
+    
+    with open(config_path, 'r') as file:
+        return yaml.safe_load(file)
 
-    if rendering_enabled and task_val not in gpu_tasks:
-        raise RuntimeError(
-            f"Task '{task_val}' requires GPU rendering to be disabled. "
-            f"Choose one of: {', '.join(gpu_tasks)}"
-        )
-    if not rendering_enabled and task_val not in no_gpu_tasks:
-        raise RuntimeError(
-            f"Task '{task_val}' requires GPU rendering to be enabled. "
-            f"Choose one of: {', '.join(no_gpu_tasks)}"
-        )
+def modify_scenario_config(config):
+    """
+    Applies test-specific overrides to the scenario config.
+    """
+    config["drone_position"] = "0.0 7.5 0.0"
+    return config
 
-    return task_val, rendering_enabled
-
-
-def get_node_details(task_val, rendering_enabled):
-    sim_data = LaunchConfiguration("simulation_data")
-    sim_rate = LaunchConfiguration("simulation_rate")
-    win_x = LaunchConfiguration("window_res_x")
-    win_y = LaunchConfiguration("window_res_y")
-    rend_qual = LaunchConfiguration("rendering_quality")
-
-    stonefish_dir = get_package_share_directory("stonefish_sim")
-    scenario = PathJoinSubstitution(
-        [stonefish_dir, "scenarios", TextSubstitution(text=f"{task_val}.scn")]
-    )
-
-    if rendering_enabled:
-        exe = "stonefish_simulator"
-        node_args = [sim_data, scenario, sim_rate, win_x, win_y, rend_qual]
-        node_name = "stonefish_simulator"
-    else:
-        exe = "stonefish_simulator_nogpu"
-        node_args = [sim_data, scenario, sim_rate]
-        node_name = "stonefish_simulator_nogpu"
-
-    return exe, node_args, node_name
+def write_temp_config(config):
+    tmp_file = tempfile.NamedTemporaryFile(mode='w', suffix='.yaml', delete=False)
+    yaml.safe_dump(config, tmp_file)
+    tmp_file.close()
+    return tmp_file.name
 
 
 def launch_setup(context, *args, **kwargs):
-    task_val, rendering_enabled = get_task_and_rendering_value(context)
+    task_val = LaunchConfiguration("task").perform(context)
 
-    executable, node_args, node_name = get_node_details(task_val, rendering_enabled)
+    scnenario_config = load_scenario_config(task_val)
 
-    config_file_path = os.path.join(
-        get_package_share_directory("stonefish_sim"),"config",
-        task_val + "_config.yaml",
+    test_config = modify_scenario_config(scnenario_config)
+
+    tmp_file_path = write_temp_config(test_config)
+
+    sim_launch_file = os.path.join(
+        get_package_share_directory("stonefish_sim"),
+        "launch",
+        "simulation.launch.py"
     )
 
-    if not os.path.exists(config_file_path):
-        raise FileNotFoundError(f"Configuration file not found: {config_file_path}")
-
-    with open(config_file_path, 'r') as file:
-        yaml_params = yaml.safe_load(file)
-
-    test_params = setup_test_params(yaml_params)
-
-    node = Node(
-        package="stonefish_ros2",
-        executable=executable,
-        namespace="stonefish_ros2",
-        name=node_name,
-        arguments=node_args,
-        parameters=[
-            test_params
-        ],
-        output="screen",
+    sim_launch = IncludeLaunchDescription(
+        PythonLaunchDescriptionSource(sim_launch_file),
+        launch_arguments={
+            "task": task_val,
+            "scenario_config_override": tmp_file_path,
+        }.items(),
     )
 
     aruco_config_path = os.path.join(
@@ -141,63 +88,33 @@ def launch_setup(context, *args, **kwargs):
         output="screen",
     )
 
-    return [node, aruco_node]
-
-def setup_test_params(yaml_params):
-    yaml_params['drone_position'] = "0.0 7.5 0.0"
-
-    return yaml_params
+    return [sim_launch, aruco_node]
 
 
 def generate_test_description():
     stonefish_dir = get_package_share_directory("stonefish_sim")
 
-    ld = LaunchDescription(
-        [
-            DeclareLaunchArgument(
-                "rendering",
-                default_value="true",
-                description="Enable GPU rendering (true/false)",
-            ),
-            DeclareLaunchArgument(
-                "task",
-                default_value="docking",
-                description=(
-                    "Scenario to load. Use one of "
-                    f"{gpu_tasks + no_gpu_tasks}, or leave as 'auto' "
-                    "to choose automatically."
-                ),
-            ),
-            DeclareLaunchArgument(
-                "simulation_data",
-                default_value=PathJoinSubstitution([stonefish_dir, "data"]),
-                description="Path to the simulation data folder",
-            ),
-            DeclareLaunchArgument(
-                "simulation_rate",
-                default_value="100.0",
-                description="Physics update rate [Hz]",
-            ),
-            DeclareLaunchArgument(
-                "window_res_x", default_value="1920", description="Render window width"
-            ),
-            DeclareLaunchArgument(
-                "window_res_y", default_value="1080", description="Render window height"
-            ),
-            DeclareLaunchArgument(
-                "rendering_quality",
-                default_value="high",
-                description="Rendering quality (high/med/low)",
-            ),
-            OpaqueFunction(function=launch_setup),
-            launch.actions.TimerAction(
-                period=5.0,
-                actions=[launch_testing.actions.ReadyToTest()],
-            ),
-        ]
+    sim_task_arg = DeclareLaunchArgument(
+        "task",
+        default_value="docking",
+        description="Task to run the simulation for"
     )
-    return ld, locals()
 
+    sim_scenario_config_override = DeclareLaunchArgument(
+        "scenario_config_override",
+        default_value="",
+        description="Path to override scenario config YAML"
+    )
+
+    return LaunchDescription([
+        sim_task_arg,
+        sim_scenario_config_override,
+        OpaqueFunction(function=launch_setup),
+        TimerAction(
+            period=5.0,
+            actions=[launch_testing.actions.ReadyToTest()],
+        )
+    ]), {}
 
 
 class TestArucoDetectorRuntime(unittest.TestCase):
