@@ -7,6 +7,9 @@ import unittest
 import rclpy
 import geometry_msgs.msg as geometry_msgs
 from rclpy.qos import qos_profile_sensor_data
+import math
+import tf2_ros
+import tf2_geometry_msgs
 
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, OpaqueFunction, TimerAction, IncludeLaunchDescription
@@ -18,6 +21,8 @@ from launch_ros.actions import Node
 import launch_testing.actions
 import launch_testing
 import launch
+
+DOCK_POS = []
 
 def load_scenario_config(task_val):
     """
@@ -39,7 +44,8 @@ def modify_scenario_config(config):
     """
     Applies test-specific overrides to the scenario config.
     """
-    config["drone_position"] = "0.0 7.5 0.0"
+    config["drone_position"] = "0.0 7.5 2.0"
+    DOCK_POS[:] = [float(x) for x in config["docking_station_position"].split()]
     return config
 
 def write_temp_config(config):
@@ -72,6 +78,14 @@ def launch_setup(context, *args, **kwargs):
         }.items(),
     )
 
+    sim_interface_node = Node(
+                package="vortex_sim_interface",
+                executable="vortex_sim_interface",
+                name="vortex_sim_interface",
+                output="screen",
+                emulate_tty=True,
+            )
+
     aruco_config_path = os.path.join(
         get_package_share_directory("aruco_detector"), "config", "aruco_detector_params.yaml"
     )
@@ -88,7 +102,7 @@ def launch_setup(context, *args, **kwargs):
         output="screen",
     )
 
-    return [sim_launch, aruco_node]
+    return [sim_launch, aruco_node, sim_interface_node]
 
 
 def generate_test_description():
@@ -157,6 +171,77 @@ class TestArucoDetectorRuntime(unittest.TestCase):
             assert len(msgs_rx) > 1
         finally:
             self.node.destroy_subscription(sub)
+
+    def test_pose_transformed_to_odom_close_to_dock(self):
+        import time
+
+        tf_buffer = tf2_ros.Buffer()
+        tf_listener = tf2_ros.TransformListener(tf_buffer, self.node)
+
+        msgs_rx = []
+
+        def callback(msg):
+            msgs_rx.append(msg)
+
+        sub = self.node.create_subscription(
+            geometry_msgs.PoseStamped,
+            '/aruco_detector/board',
+            callback,
+            qos_profile=qos_profile_sensor_data
+        )
+
+        try:
+            end_time = pytime.time() + 20  # wait longer for messages and transforms
+
+            # Wait for PoseStamped message
+            while pytime.time() < end_time and not msgs_rx:
+                rclpy.spin_once(self.node, timeout_sec=0.5)
+
+            self.assertGreater(len(msgs_rx), 0, "No PoseStamped messages received")
+
+            pose_msg = msgs_rx[0]
+
+            # Wait until 'odom' frame is available in TF
+            tf_wait_timeout = pytime.time() + 10
+            while pytime.time() < tf_wait_timeout:
+                frames = tf_buffer.all_frames_as_string()
+                if 'odom' in frames:
+                    break
+                rclpy.spin_once(self.node, timeout_sec=0.5)
+                time.sleep(0.1)
+            else:
+                self.fail("TF 'odom' frame not found in tf_buffer")
+
+            # Now lookup transform
+            try:
+                trans = tf_buffer.lookup_transform(
+                    'odom',
+                    pose_msg.header.frame_id,
+                    rclpy.time.Time(), ## TODO: fix to use msg timestamp, sim out of sync
+                    timeout=rclpy.duration.Duration(seconds=0.1)
+                )
+            except tf2_ros.TransformException as ex:
+                self.fail(f"Transform lookup failed: {ex}")
+
+            # Transform PoseStamped to 'odom'
+            pose_odom = tf2_geometry_msgs.do_transform_pose(pose_msg.pose, trans)
+
+            # Compare position with DOCK_POS
+            pos = pose_odom.position
+            dock = DOCK_POS
+            tolerance = 0.3  # meters
+
+            dist = math.sqrt(
+                (pos.x - dock[0]) ** 2 +
+                (pos.y - dock[1]) ** 2 +
+                (pos.z - dock[2]) ** 2
+            )
+            self.assertLessEqual(dist, tolerance, f"Dock position differs by {dist}m, tolerance {tolerance}m")
+
+        finally:
+            self.node.destroy_subscription(sub)
+            # Do NOT call tf_listener.destroy()
+
 
 
 @launch_testing.post_shutdown_test()
