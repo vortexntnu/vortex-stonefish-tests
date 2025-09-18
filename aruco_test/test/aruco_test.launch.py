@@ -24,14 +24,14 @@ import launch
 
 DOCK_POS = []
 
-def load_scenario_config(task_val):
+def load_scenario_config(scenario_val):
     """
-    Loads the scenario config YAML for the given task.
+    Loads the scenario config YAML for the given scenario.
     """
     config_path = os.path.join(
         get_package_share_directory("stonefish_sim"),
         "config",
-        f"{task_val}_config.yaml"
+        f"{scenario_val}_config.yaml"
     )
 
     if not os.path.exists(config_path):
@@ -56,9 +56,9 @@ def write_temp_config(config):
 
 
 def launch_setup(context, *args, **kwargs):
-    task_val = LaunchConfiguration("task").perform(context)
+    scenario_val = LaunchConfiguration("scenario").perform(context)
 
-    scnenario_config = load_scenario_config(task_val)
+    scnenario_config = load_scenario_config(scenario_val)
 
     test_config = modify_scenario_config(scnenario_config)
 
@@ -73,7 +73,7 @@ def launch_setup(context, *args, **kwargs):
     sim_launch = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(sim_launch_file),
         launch_arguments={
-            "task": task_val,
+            "scenario": scenario_val,
             "scenario_config_override": tmp_file_path,
         }.items(),
     )
@@ -108,10 +108,10 @@ def launch_setup(context, *args, **kwargs):
 def generate_test_description():
     stonefish_dir = get_package_share_directory("stonefish_sim")
 
-    sim_task_arg = DeclareLaunchArgument(
-        "task",
+    sim_scenario_arg = DeclareLaunchArgument(
+        "scenario",
         default_value="docking",
-        description="Task to run the simulation for"
+        description="scenario to run the simulation for"
     )
 
     sim_scenario_config_override = DeclareLaunchArgument(
@@ -121,7 +121,7 @@ def generate_test_description():
     )
 
     return LaunchDescription([
-        sim_task_arg,
+        sim_scenario_arg,
         sim_scenario_config_override,
         OpaqueFunction(function=launch_setup),
         TimerAction(
