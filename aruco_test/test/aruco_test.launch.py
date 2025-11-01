@@ -173,8 +173,6 @@ class TestArucoDetectorRuntime(unittest.TestCase):
             self.node.destroy_subscription(sub)
 
     def test_pose_transformed_to_odom_close_to_dock(self):
-        import time
-
         tf_buffer = tf2_ros.Buffer()
         tf_listener = tf2_ros.TransformListener(tf_buffer, self.node)
 
@@ -191,56 +189,47 @@ class TestArucoDetectorRuntime(unittest.TestCase):
         )
 
         try:
-            end_time = pytime.time() + 20  # wait longer for messages and transforms
+            success = False
+            end_time = pytime.time() + 10.0  # poll window
+            last_info = None  # store last error for debugging
 
-            # Wait for PoseStamped message
-            while pytime.time() < end_time and not msgs_rx:
-                rclpy.spin_once(self.node, timeout_sec=0.5)
+            while pytime.time() < end_time and not success:
+                # process any new messages
+                rclpy.spin_once(self.node, timeout_sec=0.2)
 
-            self.assertGreater(len(msgs_rx), 0, "No PoseStamped messages received")
+                # iterate over all received messages so far
+                for pose_msg in list(msgs_rx):
+                    try:
+                        trans = tf_buffer.lookup_transform(
+                            'odom',
+                            pose_msg.header.frame_id,
+                            pose_msg.header.stamp,
+                            timeout=rclpy.duration.Duration(seconds=0.1)
+                        )
 
-            pose_msg = msgs_rx[0]
+                        pose_odom = tf2_geometry_msgs.do_transform_pose(pose_msg.pose, trans)
+                        pos = pose_odom.position
+                        dock = DOCK_POS
+                        dist = math.sqrt(
+                            (pos.x - dock[0]) ** 2 +
+                            (pos.y - dock[1]) ** 2 +
+                            (pos.z - dock[2]) ** 2
+                        )
 
-            # Wait until 'odom' frame is available in TF
-            tf_wait_timeout = pytime.time() + 10
-            while pytime.time() < tf_wait_timeout:
-                frames = tf_buffer.all_frames_as_string()
-                if 'odom' in frames:
-                    break
-                rclpy.spin_once(self.node, timeout_sec=0.5)
-                time.sleep(0.1)
-            else:
-                self.fail("TF 'odom' frame not found in tf_buffer")
+                        if dist <= 0.3:
+                            success = True
+                            break
+                        else:
+                            last_info = f"Got transform but dist={dist:.2f}m"
+                    except tf2_ros.TransformException as ex:
+                        last_info = str(ex)
+                        continue
 
-            # Now lookup transform
-            try:
-                trans = tf_buffer.lookup_transform(
-                    'odom',
-                    pose_msg.header.frame_id,
-                    rclpy.time.Time(), ## TODO: fix to use msg timestamp, sim out of sync
-                    timeout=rclpy.duration.Duration(seconds=0.1)
-                )
-            except tf2_ros.TransformException as ex:
-                self.fail(f"Transform lookup failed: {ex}")
-
-            # Transform PoseStamped to 'odom'
-            pose_odom = tf2_geometry_msgs.do_transform_pose(pose_msg.pose, trans)
-
-            # Compare position with DOCK_POS
-            pos = pose_odom.position
-            dock = DOCK_POS
-            tolerance = 0.3  # meters
-
-            dist = math.sqrt(
-                (pos.x - dock[0]) ** 2 +
-                (pos.y - dock[1]) ** 2 +
-                (pos.z - dock[2]) ** 2
-            )
-            self.assertLessEqual(dist, tolerance, f"Dock position differs by {dist}m, tolerance {tolerance}m")
+            self.assertTrue(success, f"No valid transform within 10s. Last info: {last_info}")
 
         finally:
             self.node.destroy_subscription(sub)
-            # Do NOT call tf_listener.destroy()
+                # Do NOT call tf_listener.destroy()!
 
 
 
